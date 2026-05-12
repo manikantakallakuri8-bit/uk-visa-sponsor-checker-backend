@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+pandas
+openpyxl
+sentence-transformers
+langchain
+langchain-community
+langchain-openai
+langchain-chroma
+chromadb
+python-dotenv
+tqdm
+rapidfuzz
