@@ -231,3 +231,47 @@ def csv_chunk_to_documents(
         )
         docs.append(Document(page_content=row_text, metadata=meta))
     return docs
+
+
+def search_sponsor_register(query: str, vectorstore) -> str:
+    import re
+    stripped = re.sub(
+        r"(?i)(does|do|can|is|will|would|has|have|"
+        r"sponsor|skilled worker|visa|visas|licence|license|"
+        r"uk|the|a|an|for|me|us|them|they|it|"
+        r"i have an interview at|i found a job at|"
+        r"next week)\b",
+        " ",
+        query,
+    )
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    clean = normalise_company_name(stripped if stripped else query)
+    retriever = vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": 6, "fetch_k": 24},
+    )
+    docs = retriever.invoke(clean)
+    fuzzy = fuzzy_fallback(clean)
+
+    results = []
+    for doc in docs:
+        name = doc.metadata.get("organisation_name", "").strip()
+        town = doc.metadata.get("town", "").strip()
+        route = doc.metadata.get("route", "").strip()
+        rating = doc.metadata.get("type_rating", "").strip()
+        if name:
+            results.append(f"{name} | {town} | {route} | {rating}")
+        # print("----chroma results----")
+        # print(results)
+
+    for m in fuzzy:
+        results.append(
+            f"{m['organisation_name']} | {m['town']} | "
+            f"{m['route']} | {m['rating']} (fuzzy {m['fuzzy_score']}%)"
+        )
+        # print("----fuzzy results----")
+        # print(results)
+
+    if not results:
+        return "No matching sponsor found in the UK Home Office register."
+    return "Register matches:\n" + "\n".join(results[:8])

@@ -6,7 +6,7 @@ Ingest via POST /ingest-xlsx; questions via POST /ask (Groq).
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -15,13 +15,11 @@ from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-from rag_common import (
-    fuzzy_fallback,
-    get_embeddings,
-    get_vectorstore,
-    normalise_company_name,
-    spreadsheet_to_documents,
-)
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_core.tools import BaseTool
+from typing import List
+
+from rag_common import get_embeddings, get_vectorstore, spreadsheet_to_documents, normalise_company_name, fuzzy_fallback, search_sponsor_register
 
 load_dotenv()
 
@@ -68,6 +66,19 @@ app.add_middleware(
 class AskRequest(BaseModel):
     question: str
     top_k: int = 8
+
+
+class AgentQueryRequest(BaseModel):
+    question: str
+
+
+class AgentQueryResponse(BaseModel):
+    question: str
+    final_answer: str
+    reasoning_steps: List[str]
+    tools_used: List[str]
+    data_source: str = "UK Home Office Register + Web Search"
+    disclaimer: str = "Always verify sponsorship at gov.uk before applying"
 
 
 class SponsorMatch(BaseModel):
@@ -265,3 +276,80 @@ def ask_question(payload: AskRequest) -> SponsorResponse:
 
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Query failed: {exc}") from exc
+
+
+@app.post("/agent/query", response_model=AgentQueryResponse)
+async def agent_query(payload: AgentQueryRequest) -> AgentQueryResponse:
+    if not payload.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+    try:
+        vectorstore = app.state.vectorstore
+        llm = app.state.llm
+        web_search = DuckDuckGoSearchRun()
+
+        reasoning_steps = []
+        tools_used = []
+
+        # --- ReAct loop (manual implementation) ---
+
+        # Step 1 — Thought: decide what to check first
+        reasoning_steps.append("Thought: I need to check the UK sponsor register first.")
+
+        # Step 2 — Action: Tool 1 - sponsor register
+        register_result = search_sponsor_register(
+            payload.question, vectorstore
+        )
+        tools_used.append("SponsorRegisterCheck")
+        reasoning_steps.append(
+            f"Tool: SponsorRegisterCheck | Input: {payload.question}"
+        )
+        reasoning_steps.append(f"Result: {register_result[:200]}")
+
+        # Step 3 — Thought: should I search the web too?
+        reasoning_steps.append(
+            "Thought: I should also search the web for recent hiring or sponsorship news."
+        )
+
+        # Step 4 — Action: Tool 2 - web search
+        web_query = f"{payload.question} UK Skilled Worker visa sponsorship"
+        try:
+            web_result = web_search.run(web_query)
+            tools_used.append("WebSearch")
+            reasoning_steps.append(
+                f"Tool: WebSearch | Input: {web_query}"
+            )
+            reasoning_steps.append(f"Result: {web_result[:200]}")
+        except Exception:
+            web_result = "Web search unavailable."
+            reasoning_steps.append("WebSearch failed — using register data only.")
+
+        # Step 5 — Final Answer: LLM synthesises both results
+        reasoning_steps.append(
+            "Thought: I now have register data and web context. Generating final answer."
+        )
+
+        prompt = (
+            "You are a UK visa sponsorship assistant using a ReAct reasoning approach.\n"
+            "Based on the register data and web search results below, answer the user's question.\n"
+            "Be specific — mention sponsorship status, rating, location if available.\n\n"
+            f"User question: {payload.question}\n\n"
+            f"Sponsor Register Data:\n{register_result}\n\n"
+            f"Web Search Results:\n{web_result}\n\n"
+            "Final Answer:"
+        )
+
+        response = llm.invoke(prompt)
+        final_answer = response.content
+
+        return AgentQueryResponse(
+            question=payload.question,
+            final_answer=final_answer,
+            reasoning_steps=reasoning_steps,
+            tools_used=tools_used,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Agent query failed: {exc}",
+        ) from exc
